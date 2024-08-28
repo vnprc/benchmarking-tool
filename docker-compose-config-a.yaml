@@ -6,6 +6,8 @@ volumes:
   bitcoin_pool_side_data:
   bitcoin_miner_side_data:
   bitcoin_sv1_pool_side_data:
+  nutshell_mint_data:
+  nutshell_wallet_data:
 
 networks:
   monitor-net:
@@ -384,6 +386,44 @@ services:
         ipv4_address: 10.5.0.19
     cap_add:
       - NET_ADMIN
+
+  nutshell-mint:
+    build:
+      context: https://github.com/cashubtc/nutshell.git
+      dockerfile: Dockerfile
+    container_name: nutshell-mint
+    ports:
+      - "3338:3338"
+    environment:
+      - MINT_BACKEND_BOLT11_SAT=FakeWallet
+      - MINT_LISTEN_HOST=0.0.0.0
+      - MINT_LISTEN_PORT=3338
+      - MINT_PRIVATE_KEY=TEST_PRIVATE_KEY
+    command: ["poetry", "run", "mint"]
+    volumes:
+      - nutshell_mint_data:/app/data
+    networks:
+      sv2-net:
+        ipv4_address: 10.5.0.40
+
+  nutshell-wallet:
+    build:
+      context: https://github.com/cashubtc/nutshell.git
+      dockerfile: Dockerfile
+    container_name: nutshell-wallet
+    ports:
+      - "4448:4448"
+    depends_on:
+      - nutshell-mint
+    environment:
+      - MINT_URL=http://nutshell-mint:3338
+      - API_HOST=0.0.0.0
+    command: ["poetry", "run", "cashu", "-d"]
+    volumes:
+      - nutshell_wallet_data:/app/data
+    networks:
+      sv2-net:
+        ipv4_address: 10.5.0.41
 
   sv1-node-pool-proxy:
     image: sv1-custom-proxy-builder-image
