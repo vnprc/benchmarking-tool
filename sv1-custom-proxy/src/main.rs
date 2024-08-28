@@ -42,6 +42,8 @@ async fn transfer(
                 let line = client_buf.drain(..=pos).collect::<Vec<_>>();
                 if let Ok(json) = serde_json::from_slice::<Value>(&line) {
                     println!("Client to Server: {}", json);
+                    let blinded_secret = "TODO";
+                    println!("Blinded secret: {}", blinded_secret);
                     if json["method"] == "mining.submit" {
                         submitted_shares.inc();
                         if let Some(params) = json["params"].as_array() {
