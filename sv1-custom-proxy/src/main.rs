@@ -1,3 +1,7 @@
+use bitcoin::bip32::{ChildNumber, DerivationPath};
+use cdk::amount::{Amount, SplitTarget};
+use cdk::nuts::{CurrencyUnit, MintKeySet};
+use cdk::wallet::Wallet;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Client, Request, Response, Server, Uri};
 use prometheus::{
@@ -10,10 +14,12 @@ use std::convert::Infallible;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use tokio::sync::RwLock;
 use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{sleep, Duration};
 use warp::Filter;
+use bitcoin::secp256k1::Secp256k1;
 
 #[allow(clippy::too_many_arguments)]
 async fn transfer(
@@ -25,9 +31,32 @@ async fn transfer(
     share_submission_timestamp: GaugeVec,
     new_job_gauge: Gauge,
     new_job_prev_hash_gauge: Gauge,
+    wallet: Arc<RwLock<Wallet>>,
 ) -> io::Result<()> {
     let (mut ri, mut wi) = inbound.split();
     let (mut ro, mut wo) = outbound.split();
+
+    let wallet = wallet.read().await;
+    
+    // stolen from cdk derivation_path_from_unit
+    let derivation_path = DerivationPath::from(vec![
+        ChildNumber::from_hardened_idx(0).expect("0 is a valid index"),
+        ChildNumber::from_hardened_idx(CurrencyUnit::Hash.derivation_index()).expect("0 is a valid index"),
+        ChildNumber::from_hardened_idx(0).expect("0 is a valid index"),
+    ]);
+
+    // TODO retrieve keyset from mint
+    let seed = "test_seed".as_bytes();
+    let keyset = MintKeySet::generate_from_seed(
+        &Secp256k1::new(),
+        seed,
+        2,
+        CurrencyUnit::Hash,
+        derivation_path,
+    );
+
+    let keyset_id = keyset.id;
+    let mut ehash_token_count: u32 = 0;
 
     let client_to_server = async {
         let mut buf = vec![0; 4096];
@@ -42,8 +71,15 @@ async fn transfer(
                 let line = client_buf.drain(..=pos).collect::<Vec<_>>();
                 if let Ok(json) = serde_json::from_slice::<Value>(&line) {
                     println!("Client to Server: {}", json);
-                    let blinded_secret = "TODO";
-                    println!("Blinded secret: {}", blinded_secret);
+                    let blinded_secret: Result<cdk::nuts::PreMintSecrets, cdk::wallet::error::Error> = wallet.generate_premint_secrets(
+                        keyset_id,
+                        Amount::from(1),
+                        &SplitTarget::None,
+                        None,
+                        ehash_token_count
+                    );
+                    ehash_token_count += 1;
+                    println!("Blinded secret: {:?}", blinded_secret);
                     if json["method"] == "mining.submit" {
                         submitted_shares.inc();
                         if let Some(params) = json["params"].as_array() {
@@ -380,6 +416,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prometheus_exporter_address =
         env::var("PROM_ADDRESS").expect("PROM_ADDRESS environment variable not set");
 
+    use std::sync::Arc;
+    
+    use cdk::cdk_database::WalletMemoryDatabase;
+    use cdk::nuts::CurrencyUnit;
+    use cdk::wallet::Wallet;
+    use rand::Rng;
+    
+    let seed = rand::thread_rng().gen::<[u8; 32]>();
+    let mint_url = "https://testnut.cashu.space";
+    let unit = CurrencyUnit::Hash;
+    
+    let localstore = WalletMemoryDatabase::default();
+    let wallet = Arc::new(RwLock::new(Wallet::new(mint_url, unit, Arc::new(localstore), &seed, None)));
+
     tokio::spawn(async move {
         let metrics_route = warp::path("metrics").map(move || {
             let encoder = TextEncoder::new();
@@ -440,6 +490,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let new_job_gauge = sv1_new_job_latency.clone();
             let new_job_prev_hash_gauge = sv1_new_job_prev_hash_latency.clone();
 
+            let wallet_clone = Arc::clone(&wallet);
+
             tokio::spawn(async move {
                 if let Err(e) = transfer(
                     inbound,
@@ -450,6 +502,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     share_submission_timestamp_clone,
                     new_job_gauge,
                     new_job_prev_hash_gauge,
+                    wallet_clone,
                 )
                 .await
                 {
